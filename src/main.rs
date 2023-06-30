@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::process;
+use std::io::{BufRead, BufReader};
 
 enum SearchMode {
     File,   // Search for file or folder name
@@ -20,12 +21,12 @@ fn main() {
 
     match config.mode {
         SearchMode::File => {
-            // TODO: Implement search for file or folder name
+            search_file_or_folder(&config.query, &config.target);
         }
         SearchMode::Content => {
-            // TODO: Implement search inside a specific file
+            search_inside_file(&config.query, &config.target);
         }
-    }
+    }    
 }
 
 struct Config {
@@ -49,5 +50,31 @@ impl Config {
         };
 
         Ok(Config { query, target, mode })
+    }
+}
+
+fn search_file_or_folder(query: &str, target: &str) {
+    let entries = fs::read_dir(target).unwrap();
+
+    for entry in entries {
+        if let Ok(entry) = entry {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.contains(query) {
+                println!("{}", entry.path().display());
+            }
+        }
+    }
+}
+
+fn search_inside_file(query: &str, target: &str) {
+    let file = fs::File::open(target).unwrap();
+    let reader = BufReader::new(file);
+
+    for (line_number, line) in reader.lines().enumerate() {
+        if let Ok(line) = line {
+            if line.contains(query) {
+                println!("Line {}: {}", line_number + 1, line);
+            }
+        }
     }
 }
