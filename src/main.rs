@@ -2,11 +2,41 @@ use std::env;
 use std::fs;
 use std::process;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
 
 enum SearchMode {
     File,     // Search for file or folder name
     Content,  // Search inside a specific file
+}
+
+struct Config {
+    query: String,
+    target: String,
+    mode: SearchMode,
+    depth: Option<usize>,
+    num_threads: usize,
+}
+
+impl Config {
+    fn build(args: &[String]) -> Result<Config, &'static str> {
+        if args.len() < 3 {
+            return Err("not enough arguments");
+        }
+    
+        let query = args[1].clone();
+        let target = args[2].clone();
+        let mode = match args.get(3).map(|s| s.as_str()) {
+            Some("file") => SearchMode::File,
+            Some("content") => SearchMode::Content,
+            _ => return Err("invalid search mode"),
+        };
+        let depth = args.get(4).and_then(|arg| arg.parse::<usize>().ok()).unwrap_or(0);
+        let num_threads = args.get(5).and_then(|arg| arg.parse::<usize>().ok()).unwrap_or(2);
+    
+        Ok(Config { query, target, mode, depth: Some(depth), num_threads })
+    }    
 }
 
 fn main() {
@@ -22,7 +52,7 @@ fn main() {
 
     match config.mode {
         SearchMode::File => {
-            search_file_or_folder(&config.query, &config.target, config.depth);
+            search_file_or_folder(&config.query, &config.target, config.depth, config.num_threads);
         }
         SearchMode::Content => {
             search_inside_file(&config.query, &config.target);
@@ -30,44 +60,43 @@ fn main() {
     }    
 }
 
-struct Config {
-    query: String,
-    target: String,
-    mode: SearchMode,
-    depth: Option<usize>,
-}
+fn search_file_or_folder(query: &str, target: &str, depth: Option<usize>, num_threads: usize) {
+    let (sender, receiver) = mpsc::channel();
 
-impl Config {
-    fn build(args: &[String]) -> Result<Config, &'static str> {
-        if args.len() < 4 {
-            return Err("not enough arguments");
+    let target_path = Path::new(target);
+    let depth = depth.unwrap_or(0);
+
+    for _ in 0..num_threads {
+        let sender_clone = sender.clone();
+        let query_clone = query.to_owned();
+        let target_path_clone = target_path.to_path_buf();
+        let depth_clone = depth;
+        thread::spawn(move || {
+            search_recursive(&query_clone, &target_path_clone, depth_clone, 0, sender_clone);
+        });
+    }
+
+    drop(sender);
+
+    for result in receiver {
+        if let Ok(path) = result {
+            println!("{}", path.display());
         }
-
-        let query = args[1].clone();
-        let target = args[2].clone();
-        let mode = match args[3].as_str() {
-            "file" => SearchMode::File,
-            "content" => SearchMode::Content,
-            _ => return Err("invalid search mode"),
-        };
-        let depth = args.get(4).and_then(|arg| arg.parse::<usize>().ok()).unwrap_or(0);
-
-        Ok(Config { query, target, mode, depth: Some(depth) })
     }
 }
 
-fn search_file_or_folder(query: &str, target: &str, depth: Option<usize>) {
-    search_recursive(query, &PathBuf::from(target), depth, 0);
-}
+fn search_recursive(query: &str, target: &PathBuf, depth: usize, current_depth: usize, sender: mpsc::Sender<Result<PathBuf, std::io::Error>>) {
+    if current_depth > depth {
+        return;
+    }
 
-fn search_recursive(query: &str, target: &PathBuf, depth: Option<usize>, current_depth: usize) {
-    if let Some(max_depth) = depth {
-        if current_depth > max_depth {
+    let entries = match fs::read_dir(target) {
+        Ok(entries) => entries,
+        Err(err) => {
+            sender.send(Err(err)).unwrap();
             return;
         }
-    }
-
-    let entries = fs::read_dir(target).unwrap();
+    };
 
     for entry in entries {
         if let Ok(entry) = entry {
@@ -75,11 +104,18 @@ fn search_recursive(query: &str, target: &PathBuf, depth: Option<usize>, current
             let name = entry.file_name().to_string_lossy().to_string();
 
             if name.contains(query) {
-                println!("{}", path.display());
+                sender.send(Ok(path.clone())).unwrap();
             }
 
             if path.is_dir() {
-                search_recursive(query, &path, depth, current_depth + 1);
+                let sender_clone = sender.clone();
+                let query_clone = query.to_owned();
+                let path_clone = path.clone();
+                let depth_clone = depth;
+                let current_depth_clone = current_depth + 1;
+                thread::spawn(move || {
+                    search_recursive(&query_clone, &path_clone, depth_clone, current_depth_clone, sender_clone);
+                });
             }
         }
     }
