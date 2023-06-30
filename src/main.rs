@@ -17,6 +17,7 @@ struct Config {
     mode: SearchMode,
     depth: Option<usize>,
     num_threads: usize,
+    invert_match: bool, // Added field for the "anti-grep" behavior
 }
 
 impl Config {
@@ -25,17 +26,20 @@ impl Config {
             return Err("not enough arguments");
         }
     
-        let query = args[1].clone();
-        let target = args[2].clone();
-        let mode = match args.get(3).map(|s| s.as_str()) {
+        let mode = match args.get(1).map(|s| s.as_str()) {
             Some("file") => SearchMode::File,
             Some("content") => SearchMode::Content,
             _ => return Err("invalid search mode"),
         };
+        let query = args[2].clone();
+        let target = args[3].clone();
         let depth = args.get(4).and_then(|arg| arg.parse::<usize>().ok()).unwrap_or(0);
         let num_threads = args.get(5).and_then(|arg| arg.parse::<usize>().ok()).unwrap_or(2);
     
-        Ok(Config { query, target, mode, depth: Some(depth), num_threads })
+        // Check if the --invert or --no-match flag is present
+        let invert_match = args.iter().any(|arg| arg == "--invert");
+    
+        Ok(Config { query, target, mode, depth: Some(depth), num_threads, invert_match })
     }    
 }
 
@@ -55,7 +59,7 @@ fn main() {
             search_file_or_folder(&config.query, &config.target, config.depth, config.num_threads);
         }
         SearchMode::Content => {
-            search_inside_file(&config.query, &config.target);
+            search_inside_file(&config.query, &config.target, config.invert_match);
         }
     }    
 }
@@ -72,7 +76,7 @@ fn search_file_or_folder(query: &str, target: &str, depth: Option<usize>, num_th
         let target_path_clone = target_path.to_path_buf();
         let depth_clone = depth;
         thread::spawn(move || {
-            search_recursive(&query_clone, &target_path_clone, depth_clone, 0, sender_clone);
+            search_recursive(&query_clone, &target_path_clone, depth_clone, 0, sender_clone, false);
         });
     }
 
@@ -85,7 +89,7 @@ fn search_file_or_folder(query: &str, target: &str, depth: Option<usize>, num_th
     }
 }
 
-fn search_recursive(query: &str, target: &PathBuf, depth: usize, current_depth: usize, sender: mpsc::Sender<Result<PathBuf, std::io::Error>>) {
+fn search_recursive(query: &str, target: &PathBuf, depth: usize, current_depth: usize, sender: mpsc::Sender<Result<PathBuf, std::io::Error>>, invert_match: bool) {
     if current_depth > depth {
         return;
     }
@@ -103,7 +107,9 @@ fn search_recursive(query: &str, target: &PathBuf, depth: usize, current_depth: 
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
 
-            if name.contains(query) {
+            let matches_query = name.contains(query);
+            
+            if (matches_query && !invert_match) || (!matches_query && invert_match) {
                 sender.send(Ok(path.clone())).unwrap();
             }
 
@@ -114,20 +120,22 @@ fn search_recursive(query: &str, target: &PathBuf, depth: usize, current_depth: 
                 let depth_clone = depth;
                 let current_depth_clone = current_depth + 1;
                 thread::spawn(move || {
-                    search_recursive(&query_clone, &path_clone, depth_clone, current_depth_clone, sender_clone);
+                    search_recursive(&query_clone, &path_clone, depth_clone, current_depth_clone, sender_clone, invert_match);
                 });
             }
         }
     }
 }
 
-fn search_inside_file(query: &str, target: &str) {
+fn search_inside_file(query: &str, target: &str, invert_match: bool) {
     let file = fs::File::open(target).unwrap();
     let reader = BufReader::new(file);
 
     for (line_number, line) in reader.lines().enumerate() {
         if let Ok(line) = line {
-            if line.contains(query) {
+            let matches_query = line.contains(query);
+            
+            if (matches_query && !invert_match) || (!matches_query && invert_match) {
                 println!("Line {}: {}", line_number + 1, line);
             }
         }
